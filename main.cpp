@@ -31,7 +31,8 @@ protected:
 public:
     void refresh(scrn_status_t *status)
     {
-        memcpy(m_image.bits() + status->update_offset, vnc.buf + status->update_offset, status->update_size);
+        memcpy(m_image.bits() + status->update_offset, vnc.buf + status->update_offset, static_cast<size_t>(status->update_size));
+        update();
     }
     void setsize(int w, int h)
     {
@@ -72,16 +73,16 @@ int main(int argc, char *argv[])
         {
             break;
         }
-        if( status.updated )
-        {
-            status.updated = 0;
-            scrn.refresh(&status);
-        }
         if( status.fbsize_updated )
         {
             status.fbsize_updated = 0;
             w.setFixedSize(vnc.server.width, vnc.server.height);
             scrn.setsize(vnc.server.width, vnc.server.height);
+        }
+        if( status.updated )
+        {
+            status.updated = 0;
+            scrn.refresh(&status);
         }
         qApp->processEvents();
     }

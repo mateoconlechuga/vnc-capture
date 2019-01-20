@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <limits.h>
 #include <string.h>
 #include <errno.h>
 #include <string.h>
@@ -26,9 +27,9 @@ long time_diff(struct timespec start, struct timespec end)
 }
 
 // blocks until all bytes are read from socket
-static inline int rfb_read(void *out, size_t n)
+static inline int rfb_read(void *out, unsigned int n)
 {
-    size_t len = recv(vnc.sock, out, n, MSG_WAITALL);
+    size_t len = recv(vnc.sock, out, (size_t)n, MSG_WAITALL);
     if( len != n )
     {
         return 0;
@@ -246,7 +247,7 @@ int rfb_authenticate_link(void) {
 // also tell the server about us
 int rfb_initialize_server(void)
 {
-    int len;
+    unsigned int len;
     rfbServerInitMsg si;
     rfbClientInitMsg cl;
     cl.shared = 1;
@@ -292,14 +293,15 @@ int rfb_initialize_server(void)
     return 1;
 }
 
+#define NUM_ENCODINGS 2
+#define MAX_ENCODINGS 20
+
 typedef struct
 {
     rfbSetEncodingsMsg msg;
-    CARD32 enc[20];
+    CARD32 enc[MAX_ENCODINGS];
 }
 encoding_t;
-
-#define NUM_ENCODINGS 2
 
 // just use the server formats
 // we want this to be as fast as possible, so don't let the server translate
@@ -309,7 +311,7 @@ int rfb_negotiate_frame_format(void)
 #ifndef USE_SERVER_FORMAT
     rfbSetPixelFormatMsg pf;
 
-    pf.type = 0;
+    pf.type = rfbSetPixelFormat;
     pf.format.bitsPerPixel = vnc.server.bpp;
     pf.format.depth = vnc.server.depth;
     pf.format.bigEndian = vnc.server.bigendian;
@@ -317,9 +319,9 @@ int rfb_negotiate_frame_format(void)
     pf.format.redMax = ENDIAN16(vnc.server.redmax);
     pf.format.greenMax = ENDIAN16(vnc.server.greenmax);
     pf.format.blueMax = ENDIAN16(vnc.server.bluemax);
-    pf.format.redShift = 16;
+    pf.format.redShift = 0;
     pf.format.greenShift = 8;
-    pf.format.blueShift = 0;
+    pf.format.blueShift = 16;
 
     if( !rfb_write(&pf, sz_rfbSetPixelFormatMsg) )
     {
@@ -383,31 +385,20 @@ int rfb_cut_text_message(rfbServerToClientMsg *msg) {
     return 1;
 }
 
-int rfb_enc_raw(rfbFramebufferUpdateRectHeader rectheader, scrn_status_t *status)
+static int rfb_enc_raw(rfbFramebufferUpdateRectHeader rectheader)
 {
     //struct timespec time1, time2;
     unsigned int height = rectheader.r.h;
-    size_t stride = rectheader.r.w * vnc.server.pixelsize;
-    size_t buf_stride = vnc.server.width * vnc.server.pixelsize;
+    unsigned int stride = rectheader.r.w * vnc.server.pixelsize;
+    unsigned int buf_stride = vnc.server.width * vnc.server.pixelsize;
     uint8_t *buf;
 
-    status->update_offset = buf_stride * rectheader.r.y;
-    status->update_size = buf_stride * rectheader.r.h;
-    status->update_ptr = vnc.buf + status->update_offset;
-
-    fprintf(stdout, "update: %d,%d,%d,%d\t%d,%d\n",
-            rectheader.r.x,
-            rectheader.r.y,
-            rectheader.r.w,
-            rectheader.r.h,
-            status->update_offset,
-            status->update_size);
-    fflush(stdout);
-    buf = status->update_ptr + rectheader.r.x * vnc.server.pixelsize;
+    buf = vnc.buf + (buf_stride * rectheader.r.y) + (rectheader.r.x * vnc.server.pixelsize);
 
     //clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &time1);
 
     // optimize the case where data spans the whole screen
+    // this doesn't actually help; because packets are huge
     /*if( rectheader.r.x == 0 && stride == vnc.server.width )
     {
         if( !rfb_read(buf, height * stride))
@@ -415,7 +406,7 @@ int rfb_enc_raw(rfbFramebufferUpdateRectHeader rectheader, scrn_status_t *status
             return 0;
         }
     }*/
-    while( height )
+    while( height-- )
     {
         if( !rfb_read(buf, stride))
         {
@@ -423,7 +414,6 @@ int rfb_enc_raw(rfbFramebufferUpdateRectHeader rectheader, scrn_status_t *status
         }
 
         buf += buf_stride;
-        height--;
     }
 
     //clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &time2);
@@ -434,7 +424,7 @@ int rfb_enc_raw(rfbFramebufferUpdateRectHeader rectheader, scrn_status_t *status
     return 1;
 }
 
-int rfb_request_frame(uint8_t incr)
+static int rfb_request_frame(uint8_t incr)
 {
     static rfbFramebufferUpdateRequestMsg fur = { 0 };
 
@@ -445,7 +435,6 @@ int rfb_request_frame(uint8_t incr)
     fur.w = ENDIAN16(vnc.server.width);
     fur.h = ENDIAN16(vnc.server.height);
 
-    // attempt to read the frame itself
     if( !rfb_write(&fur, sz_rfbFramebufferUpdateRequestMsg) )
     {
         fprintf(stdout, "request error.\n");
@@ -470,6 +459,8 @@ static int rfb_handle_message(scrn_status_t *status)
         rfbFramebufferUpdateRectHeader rectheader;
         rfbServerToClientMsg msg;
         uint16_t i;
+        int miny = INT_MAX;
+        int maxy = INT_MIN;
 
         if( !rfb_read(&msg, 1) )
         {
@@ -479,26 +470,38 @@ static int rfb_handle_message(scrn_status_t *status)
         switch( msg.type )
         {
             case rfbFramebufferUpdate:
-                rfb_read(((char*)&msg.fu) + 1, sz_rfbFramebufferUpdateMsg - 1);
+                if( !rfb_read(((char*)&msg.fu) + 1, sz_rfbFramebufferUpdateMsg - 1) )
+                {
+                    return 0;
+                }
                 msg.fu.nRects = ENDIAN16(msg.fu.nRects);
                 for( i = 0; i < msg.fu.nRects; i++ )
                 {
                     int result = 0;
-                    rfb_read(&rectheader, sz_rfbFramebufferUpdateRectHeader);
+                    if( !rfb_read(&rectheader, sz_rfbFramebufferUpdateRectHeader) )
+                    {
+                            return 0;
+                    }
 
                     rectheader.r.x = ENDIAN16(rectheader.r.x);
                     rectheader.r.y = ENDIAN16(rectheader.r.y);
                     rectheader.r.w = ENDIAN16(rectheader.r.w);
                     rectheader.r.h = ENDIAN16(rectheader.r.h);
 
+                    // used for determining what region of the screen to update
+                    if( rectheader.r.y < miny )
+                    {
+                        miny = rectheader.r.y;
+                    }
+                    if( (rectheader.r.y + rectheader.r.h) > maxy )
+                    {
+                        maxy = rectheader.r.y + rectheader.r.h;
+                    }
+
                     switch( ENDIAN32(rectheader.encoding) )
                     {
                         case rfbEncodingRaw:
-                            result = rfb_enc_raw(rectheader, status);
-                            if (status)
-                            {
-                                status->updated = result;
-                            }
+                            result = rfb_enc_raw(rectheader);
                             break;
                         case rfbEncodingNewFBSize:
                             vnc.server.width = rectheader.r.w;
@@ -525,6 +528,15 @@ static int rfb_handle_message(scrn_status_t *status)
                     }
                 }
                 rfb_request_frame(1);
+
+                // inform the user of the updated range
+                // this prevents copying of the entire buffer, and instead just the updated rectangle
+                if (status)
+                {
+                    status->updated = 1;
+                    status->update_offset = miny * vnc.server.width * vnc.server.pixelsize;
+                    status->update_size = (maxy - miny) * vnc.server.width * vnc.server.pixelsize;
+                }
                 break;
             case rfbSetColourMapEntries:
                 rfb_read(((char*)&msg.scme) + 1, sz_rfbSetColourMapEntriesMsg - 1);

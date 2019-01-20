@@ -30,19 +30,19 @@ typedef int32_t INT32;
 typedef struct
 {
    char *name;
-   int width;
-   int height;
-   int bpp;
-   int depth;
-   int bigendian;
-   int truecolour;
-   int redmax;
-   int greenmax;
-   int bluemax;
-   int redshift;
-   int greenshift;
-   int blueshift;
-   int pixelsize;
+   unsigned int width;
+   unsigned int height;
+   unsigned int bpp;
+   unsigned int depth;
+   unsigned int bigendian;
+   unsigned int truecolour;
+   unsigned int redmax;
+   unsigned int greenmax;
+   unsigned int bluemax;
+   unsigned int redshift;
+   unsigned int greenshift;
+   unsigned int blueshift;
+   unsigned int pixelsize;
 }
 server_t;
 
@@ -61,9 +61,8 @@ typedef struct
 {
     int updated;
     int fbsize_updated;
-    int update_offset;  // offset into data to start updating
-    int update_size;    // size of data to update
-    uint8_t *update_ptr;
+    unsigned int update_offset;  // offset into data to start updating
+    unsigned int update_size;    // size of data to update
 }
 scrn_status_t;
 
