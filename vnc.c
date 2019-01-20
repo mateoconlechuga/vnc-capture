@@ -437,6 +437,8 @@ static int rfb_handle_message(scrn_status_t *status)
                         case rfbEncodingNewFBSize:
                             vnc.server.width = rectheader.r.w;
                             vnc.server.height = rectheader.r.h;
+                            vnc.urq.w = ENDIAN16(vnc.server.width);
+                            vnc.urq.h = ENDIAN16(vnc.server.height);
                             status->fbsize_updated = 1;
                             fprintf(stdout, "resize requested: %dx%d\n", rectheader.r.w, rectheader.r.h);
                             fflush(stdout);
@@ -606,15 +608,11 @@ int rfb_connect(const char *path, uint16_t port, scrn_status_t *status)
     memset(&vnc.urq, 0, sizeof vnc.urq);
 
     vnc.urq.type = rfbFramebufferUpdateRequest;
-    vnc.urq.incremental = 1;
     vnc.urq.x = 0;
     vnc.urq.y = 0;
-    vnc.urq.w = vnc.server.width;
-    vnc.urq.h = vnc.server.height;
-    vnc.urq.x = ENDIAN16(vnc.urq.x);
-    vnc.urq.y = ENDIAN16(vnc.urq.y);
-    vnc.urq.w = ENDIAN16(vnc.urq.w);
-    vnc.urq.h = ENDIAN16(vnc.urq.h);
+    vnc.urq.incremental = 1;
+    vnc.urq.w = ENDIAN16(vnc.server.width);
+    vnc.urq.h = ENDIAN16(vnc.server.height);
 
     // inform the drawer to set the new size
     if( status )
