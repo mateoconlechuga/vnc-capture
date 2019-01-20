@@ -36,13 +36,41 @@ static inline int rfb_read(void *out, size_t n)
 }
 
 // attempts to write data to socket
-static inline int rfb_write(void *out, size_t n)
+static int rfb_write(void *out, size_t n)
 {
-    int status = write(vnc.sock, out, n);
-    if( status == -1 )
-    {
-        fprintf(stderr, "write failed: %s", strerror(errno));
-        return 0;
+    fd_set fds;
+    uint8_t *buf = out;
+    int i = 0;
+    int j;
+
+    while (i < n) {
+        j = write(vnc.sock, buf + i, n - i);
+        if (j <= 0)
+        {
+            if (j < 0)
+            {
+                if (errno == EWOULDBLOCK || errno == EAGAIN)
+                {
+                    FD_ZERO(&fds);
+                    FD_SET(vnc.sock, &fds);
+
+                    if (select(vnc.sock + 1, NULL, &fds, NULL, NULL) <= 0)
+                    {
+                        fprintf(stderr, "select failed.\n");
+                        return 0;
+                    }
+
+                    j = 0;
+                } else {
+                    fprintf(stderr, "write failed.\n");
+                    return 0;
+                }
+            } else {
+                fprintf(stderr, "write failed bad.\n");
+                return 0;
+            }
+        }
+        i += j;
     }
     return 1;
 }
@@ -270,11 +298,12 @@ typedef struct
 }
 encoding_t;
 
+#define NUM_ENCODINGS 2
+
 // just use the server formats
 // we want this to be as fast as possible, so don't let the server translate
 int rfb_negotiate_frame_format(void)
 {
-    uint16_t num_enc = 0;
     encoding_t em;
 #ifndef USE_SERVER_FORMAT
     rfbSetPixelFormatMsg pf;
@@ -299,14 +328,14 @@ int rfb_negotiate_frame_format(void)
 
     em.msg.type = rfbSetEncodings;
 
-    em.enc[num_enc++] = ENDIAN32(rfbEncodingRaw);
-    em.enc[num_enc++] = ENDIAN32(rfbEncodingNewFBSize);
+    em.enc[0] = ENDIAN32(rfbEncodingRaw);
+    em.enc[1] = ENDIAN32(rfbEncodingNewFBSize);
 
-    em.msg.nEncodings = ENDIAN16(num_enc);
+    em.msg.nEncodings = ENDIAN16(NUM_ENCODINGS);
 
-    fprintf(stdout, "set encoding types: %d, %lu\n", num_enc, num_enc * sizeof(CARD32));
+    fprintf(stdout, "set encoding types: %d, %lu\n", NUM_ENCODINGS, NUM_ENCODINGS * sizeof(CARD32));
 
-    if( !rfb_write(&em, sz_rfbSetEncodingsMsg + (num_enc * sizeof(CARD32))) )
+    if( !rfb_write(&em, sz_rfbSetEncodingsMsg + (NUM_ENCODINGS * sizeof(CARD32))) )
     {
         return 0;
     }
@@ -390,6 +419,28 @@ int rfb_enc_raw(rfbFramebufferUpdateRectHeader rectheader)
     return 1;
 }
 
+int rfb_request_frame(uint8_t incr)
+{
+    static rfbFramebufferUpdateRequestMsg fur = { 0 };
+
+    fur.type = rfbFramebufferUpdateRequest;
+    fur.incremental = incr;
+    fur.x = 0;
+    fur.y = 0;
+    fur.w = ENDIAN16(vnc.server.width);
+    fur.h = ENDIAN16(vnc.server.height);
+
+    // attempt to read the frame itself
+    if( !rfb_write(&fur, sz_rfbFramebufferUpdateRequestMsg) )
+    {
+        fprintf(stdout, "request error.\n");
+        rfb_disconnect();
+        return 0;
+    }
+    return 1;
+}
+
+
 // handles incomming messages from the vnc server
 // this is where the dma operations should take place
 // pass it a pointer and it will tell you if you need to
@@ -399,7 +450,7 @@ static int rfb_handle_message(scrn_status_t *status)
     int count;
 
     ioctl(vnc.sock, FIONREAD, &count);
-    if( count > 0 )
+    if( count > 1 )
     {
         rfbFramebufferUpdateRectHeader rectheader;
         rfbServerToClientMsg msg;
@@ -448,6 +499,7 @@ static int rfb_handle_message(scrn_status_t *status)
                             result = 1;
                             break;
                         default:
+                            fprintf(stdout, "unknwon request: %d", ENDIAN32(rectheader.encoding));
                             break;
                     }
 
@@ -457,6 +509,7 @@ static int rfb_handle_message(scrn_status_t *status)
                         return 0;
                     }
                 }
+                rfb_request_frame(1);
                 break;
             case rfbSetColourMapEntries:
                 rfb_read(((char*)&msg.scme) + 1, sz_rfbSetColourMapEntriesMsg - 1);
@@ -486,15 +539,11 @@ int rfb_grab(int update, scrn_status_t *status)
         return 0;
     }
     if (update) {
-        if( !rfb_write(&vnc.urq, sz_rfbFramebufferUpdateRequestMsg) )
-        {
-            fprintf(stdout, "request error.\n");
-            rfb_disconnect();
-            return 0;
-        }
+        //rfb_request_frame(1);
     }
     return 1;
 }
+
 
 // connects to the hosted socket addresses
 // returns the socket file descriptor
@@ -534,15 +583,6 @@ int rfb_connect(const char *path, uint16_t port, scrn_status_t *status)
         }
         fprintf(stdout, "complete.\n");
         fprintf(stdout, "attempting to set socket options... ");
-
-        // configure the socket for speedz
-        if( setsockopt(vnc.sock, IPPROTO_TCP, TCP_NODELAY, (char*)&one, sizeof(one)) < 0 )
-        {
-            fprintf(stdout, "error.");
-            rfb_disconnect();
-            return 0;
-        }
-        fprintf(stdout, "complete.\n");
 
     }
     else
@@ -604,20 +644,17 @@ int rfb_connect(const char *path, uint16_t port, scrn_status_t *status)
 
     fprintf(stdout, "successfully connected to vnc server.\n");
 
-    // configure the framebuffer request so if can be a little faster?
-    memset(&vnc.urq, 0, sizeof vnc.urq);
+    // who knows... but it doesn't like it when I try to request before ready
+    sleep(1);
 
-    vnc.urq.type = rfbFramebufferUpdateRequest;
-    vnc.urq.x = 0;
-    vnc.urq.y = 0;
-    vnc.urq.incremental = 1;
-    vnc.urq.w = ENDIAN16(vnc.server.width);
-    vnc.urq.h = ENDIAN16(vnc.server.height);
+    // request the first frame
+    rfb_request_frame(0);
 
     // inform the drawer to set the new size
     if( status )
     {
         status->fbsize_updated = 1;
+        status->updated = 0;
     }
 
     fflush(stdout);

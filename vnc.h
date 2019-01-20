@@ -66,6 +66,7 @@ scrn_status_t;
 
 int rfb_connect(const char *ip, uint16_t port, scrn_status_t *status);
 int rfb_grab(int update, scrn_status_t *status);
+int rfb_disconnect(void);
 
 #ifdef __cplusplus
 }

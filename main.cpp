@@ -85,5 +85,7 @@ int main(int argc, char *argv[])
         qApp->processEvents();
     }
 
+    rfb_disconnect();
+
     return a.exec();
 }
