@@ -5,7 +5,9 @@
 #include <QShortcut>
 #include "vnc.h"
 
-#define VNC_TCP
+#include <sys/stat.h>
+
+//#define VNC_TCP
 
 #define VNC_HRES 1280
 #define VNC_VRES 1024
@@ -27,10 +29,9 @@ protected:
         c.drawImage(cw, m_image);
     }
 public:
-    void refresh()
+    void refresh(scrn_status_t *status)
     {
-        memcpy(m_image.bits(), vnc.buf, m_w * m_h * 4);
-        update();
+        memcpy(m_image.bits() + status->update_offset, vnc.buf + status->update_offset, status->update_size);
     }
     void setsize(int w, int h)
     {
@@ -67,14 +68,14 @@ int main(int argc, char *argv[])
     }
 
     while( 1 ) {
-        if( !rfb_grab(1, &status) )
+        if( !rfb_grab(0, &status) )
         {
             break;
         }
         if( status.updated )
         {
             status.updated = 0;
-            scrn.refresh();
+            scrn.refresh(&status);
         }
         if( status.fbsize_updated )
         {

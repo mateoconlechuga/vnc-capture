@@ -12,6 +12,7 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -348,6 +349,7 @@ int rfb_negotiate_frame_format(void)
 int rfb_disconnect(void)
 {
     fprintf(stdout, "shutting down socket.\n");
+    fflush(stdout);
     return close(vnc.sock);
 }
 
@@ -381,15 +383,27 @@ int rfb_cut_text_message(rfbServerToClientMsg *msg) {
     return 1;
 }
 
-int rfb_enc_raw(rfbFramebufferUpdateRectHeader rectheader)
+int rfb_enc_raw(rfbFramebufferUpdateRectHeader rectheader, scrn_status_t *status)
 {
     //struct timespec time1, time2;
     unsigned int height = rectheader.r.h;
     size_t stride = rectheader.r.w * vnc.server.pixelsize;
     size_t buf_stride = vnc.server.width * vnc.server.pixelsize;
-    uint8_t *buf = vnc.buf;
+    uint8_t *buf;
 
-    buf += (rectheader.r.x * vnc.server.pixelsize) + (rectheader.r.y * buf_stride);
+    status->update_offset = buf_stride * rectheader.r.y;
+    status->update_size = buf_stride * rectheader.r.h;
+    status->update_ptr = vnc.buf + status->update_offset;
+
+    fprintf(stdout, "update: %d,%d,%d,%d\t%d,%d\n",
+            rectheader.r.x,
+            rectheader.r.y,
+            rectheader.r.w,
+            rectheader.r.h,
+            status->update_offset,
+            status->update_size);
+    fflush(stdout);
+    buf = status->update_ptr + rectheader.r.x * vnc.server.pixelsize;
 
     //clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &time1);
 
@@ -401,7 +415,7 @@ int rfb_enc_raw(rfbFramebufferUpdateRectHeader rectheader)
             return 0;
         }
     }*/
-    while( height-- )
+    while( height )
     {
         if( !rfb_read(buf, stride))
         {
@@ -409,6 +423,7 @@ int rfb_enc_raw(rfbFramebufferUpdateRectHeader rectheader)
         }
 
         buf += buf_stride;
+        height--;
     }
 
     //clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &time2);
@@ -479,7 +494,7 @@ static int rfb_handle_message(scrn_status_t *status)
                     switch( ENDIAN32(rectheader.encoding) )
                     {
                         case rfbEncodingRaw:
-                            result = rfb_enc_raw(rectheader);
+                            result = rfb_enc_raw(rectheader, status);
                             if (status)
                             {
                                 status->updated = result;
@@ -527,19 +542,24 @@ static int rfb_handle_message(scrn_status_t *status)
                 return 0;
         }
     }
-    return 1;
+    return count == -1 ? 0 : 1;
 }
 
 int rfb_grab(int update, scrn_status_t *status)
 {
+    int val;
+    socklen_t len = sizeof(val);
+
+    // check for frames
     if( !rfb_handle_message(status) )
     {
         fprintf(stdout, "update error.\n");
+        fflush(stdout);
         rfb_disconnect();
         return 0;
     }
     if (update) {
-        //rfb_request_frame(1);
+        rfb_request_frame(0);
     }
     return 1;
 }
@@ -587,7 +607,18 @@ int rfb_connect(const char *path, uint16_t port, scrn_status_t *status)
     }
     else
     {
+        int val = 0;
+        socklen_t len = sizeof(val);
         struct sockaddr_un serv_addr;
+        struct stat sb;
+
+        fprintf(stdout, "waiting for socket to appear... ");
+
+        while( stat(path, &sb) == -1 || (sb.st_mode & S_IFMT) != S_IFSOCK )
+        {
+            sleep(1);
+        }
+        fprintf(stdout, "complete.\n");
 
         fprintf(stdout, "attempting to start unix socket... ");
         if( (vnc.sock = socket(AF_UNIX, SOCK_STREAM, 0)) < 0 )
@@ -597,7 +628,17 @@ int rfb_connect(const char *path, uint16_t port, scrn_status_t *status)
         }
         fprintf(stdout, "complete.\n");
         fprintf(stdout, "attempting to connect to \'%s\'... ", path);
-
+/*
+        while( val == 0 )
+        {
+            if( getsockopt(vnc.sock, SOL_SOCKET, SO_ACCEPTCONN, &val, &len) < 0 )
+            {
+                rfb_disconnect();
+                return 0;
+            }
+            sleep(1);
+        }
+*/
         memset(&serv_addr, '0', sizeof(serv_addr));
 
         serv_addr.sun_family = AF_UNIX;

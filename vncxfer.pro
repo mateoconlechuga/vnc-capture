@@ -22,7 +22,7 @@ CONFIG(release, debug|release) {
 # GCC/clang flags
 if (!win32-msvc*) {
     GLOBAL_FLAGS    += -O3 -W -Wall -Wextra -Wunused-function -Werror=write-strings -Werror=redundant-decls -Werror=format -Werror=format-security -Werror=declaration-after-statement -Werror=implicit-function-declaration -Werror=return-type -Werror=pointer-arith -Winit-self
-    GLOBAL_FLAGS    += -ffunction-sections -fdata-sections -fno-strict-overflow
+    GLOBAL_FLAGS    += -ffunction-sections -fdata-sections -fno-strict-overflow -fomit-frame-pointer
     QMAKE_CFLAGS    += -std=gnu11
 } else {
     # TODO: add equivalent flags
@@ -35,13 +35,6 @@ if (!win32-msvc*) {
 
     # Add -MP to enable speedier builds
     QMAKE_CXXFLAGS += /MP
-}
-
-if (macx|linux) {
-    # Be more secure by default...
-    GLOBAL_FLAGS    += -fPIE -Wstack-protector -fstack-protector-strong --param=ssp-buffer-size=1
-    # Use ASAN on debug builds. Watch out about ODR crashes when built with -flto. detect_odr_violation=0 as an env var may help.
-    CONFIG(debug, debug|release): GLOBAL_FLAGS += -fsanitize=address,bounds -fsanitize-undefined-trap-on-error -O0
 }
 
 macx:  QMAKE_LFLAGS += -Wl,-dead_strip

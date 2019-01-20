@@ -61,6 +61,9 @@ typedef struct
 {
     int updated;
     int fbsize_updated;
+    int update_offset;  // offset into data to start updating
+    int update_size;    // size of data to update
+    uint8_t *update_ptr;
 }
 scrn_status_t;
 
