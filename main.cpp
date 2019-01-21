@@ -16,7 +16,7 @@
 #define VNC_PATH "127.0.0.1"
 #define VNC_PORT 5900
 #else
-#define VNC_PATH "/var/run/vnc-0"
+#define VNC_PATH "/var/run/xen/vnc-0"
 #define VNC_PORT 0
 #endif
 
@@ -29,9 +29,9 @@ protected:
         c.drawImage(cw, m_image);
     }
 public:
-    void refresh(void)
+    void refresh(vnc_t *vnc)
     {
-        memcpy(m_image.bits() + vnc.status.update_offset, vnc.buf + vnc.status.update_offset, static_cast<size_t>(vnc.status.update_size));
+        memcpy(m_image.bits() + vnc->status.update_offset, vnc->buf + vnc->status.update_offset, static_cast<size_t>(vnc->status.update_size));
         update();
     }
     void setsize(int w, int h)
@@ -50,24 +50,25 @@ private:
     int m_w, m_h;
 };
 
-void update(QMainWindow &w, Screen &scrn)
+void update(vnc_t *vnc, QMainWindow &w, Screen &scrn)
 {
-    if( vnc.status.fbsize_updated )
+    if( vnc->status.fbsize_updated )
     {
-        vnc.status.fbsize_updated = 0;
-        w.setFixedSize(vnc.server.width, vnc.server.height);
-        scrn.setsize(vnc.server.width, vnc.server.height);
+        vnc->status.fbsize_updated = 0;
+        w.setFixedSize(vnc->server.width, vnc->server.height);
+        scrn.setsize(vnc->server.width, vnc->server.height);
     }
-    if( vnc.status.updated )
+    if( vnc->status.updated )
     {
-        vnc.status.updated = 0;
-        scrn.refresh();
+        vnc->status.updated = 0;
+        scrn.refresh(vnc);
     }
     qApp->processEvents();
 }
 
 int main(int argc, char *argv[])
 {
+    static vnc_t vnc;
     QApplication a(argc, argv);
     QMainWindow w;
     Screen scrn;
@@ -79,12 +80,14 @@ int main(int argc, char *argv[])
 
     while( 1 )
     {
+        vnc_vm_off(&vnc);
+
         while( 1 )
         {
-            value = rfb_connect(static_cast<const char*>(VNC_PATH), VNC_PORT);
+            value = rfb_connect(&vnc, static_cast<const char*>(VNC_PATH), VNC_PORT);
             if( value == 0 )
             {
-                return a.exec();
+                goto exit;
             }
             if( value == 1 )
             {
@@ -92,8 +95,7 @@ int main(int argc, char *argv[])
             }
             if( value == 2 )
             {
-                vnc_vm_off();
-                update(w, scrn);
+                update(&vnc, w, scrn);
                 QTime dt = QTime::currentTime().addMSecs(2000);
                 while (QTime::currentTime() < dt) {
                     qApp->processEvents();
@@ -104,16 +106,17 @@ int main(int argc, char *argv[])
 
         while( 1 )
         {
-            if( !rfb_grab(0) )
+            if( !rfb_grab(&vnc, 0) )
             {
                 break;
             }
-            update(w, scrn);
+            update(&vnc, w, scrn);
         }
 
         fprintf(stdout, "vnc connection lost.\n");
         fflush(stdout);
     }
 
+exit:
     return a.exec();
 }

@@ -5,6 +5,10 @@
 extern "C" {
 #endif
 
+// speed up some branches
+#define likely(x) __builtin_expect(!!(x), 1)
+#define unlikely(x) !likely(!(x))
+
 // don't try to tell the server what to do
 #define VNC_DEACTIVE_HRES 800
 #define VNC_DEACTIVE_VRES 600
@@ -14,8 +18,10 @@ extern "C" {
 #define VNC_DEACTIVE_IMG_VRES 200
 #define VNC_DEACTIVE_IMG_X (((VNC_DEACTIVE_HRES) / 2) - ((VNC_DEACTIVE_IMG_HRES) / 2))
 #define VNC_DEACTIVE_IMG_Y (((VNC_DEACTIVE_VRES) / 2) - ((VNC_DEACTIVE_IMG_VRES) / 2))
+#define VNC_BUF_SIZE (4096 * 2160 * 4)
 
-extern unsigned char vm_off_bin[];
+// never write to this, so no mutex needed
+extern const unsigned char vm_off_bin[];
 
 #include <stdint.h>
 
@@ -67,21 +73,32 @@ scrn_status_t;
 
 typedef struct
 {
+    const char *uuid;            // used for identifying the display
+    const char *socket;
+    uint16_t port;
+    void *buffer;                // allocated or remapped region
+    int use_buffer;              // use user buffer instead
+}
+vnc_thread_cfg_t;
+
+typedef struct
+{
     char *path;
-    int sock;                         // connected socket for xfer
-    int version;                      // version of protocol between client / server
+    int sock;                    // connected socket for xfer
+    int version;                 // version of protocol between client / server
     server_t server;
-    uint8_t buf[4610 * 2160 * 4 * 2]; // buffer for storing pixel data
+    uint8_t buf[VNC_BUF_SIZE];   // buffer for storing pixel data
     rfbFramebufferUpdateRequestMsg urq;
     scrn_status_t status;
+    vnc_thread_cfg_t cfg;
 }
 vnc_t;
-extern vnc_t vnc;
 
-void vnc_vm_off(void);
-int rfb_connect(const char *ip, uint16_t port);
-int rfb_grab(int update);
-int rfb_disconnect(void);
+void *vnc_thread(void *config);
+void vnc_vm_off(vnc_t *vnc);
+int rfb_connect(vnc_t *vnc, const char *socket, uint16_t port);
+int rfb_grab(vnc_t *vnc, int update);
+int rfb_disconnect(vnc_t *vnc);
 
 #ifdef __cplusplus
 }
