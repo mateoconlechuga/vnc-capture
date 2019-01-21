@@ -277,6 +277,7 @@ int rfb_initialize_server(void)
     vnc.server.greenshift = si.format.greenShift;
     vnc.server.blueshift = si.format.blueShift;
     vnc.server.pixelsize = vnc.server.bpp / 8;
+    vnc.server.stride = vnc.server.width * vnc.server.pixelsize;
 
     if( !rfb_read(vnc.server.name, len) )
     {
@@ -294,7 +295,6 @@ int rfb_initialize_server(void)
 }
 
 #define NUM_ENCODINGS 2
-#define MAX_ENCODINGS 20
 
 typedef struct
 {
@@ -308,27 +308,6 @@ encoding_t;
 int rfb_negotiate_frame_format(void)
 {
     encoding_t em;
-#ifndef USE_SERVER_FORMAT
-    rfbSetPixelFormatMsg pf;
-
-    pf.type = rfbSetPixelFormat;
-    pf.format.bitsPerPixel = vnc.server.bpp;
-    pf.format.depth = vnc.server.depth;
-    pf.format.bigEndian = vnc.server.bigendian;
-    pf.format.trueColour = vnc.server.truecolour;
-    pf.format.redMax = ENDIAN16(vnc.server.redmax);
-    pf.format.greenMax = ENDIAN16(vnc.server.greenmax);
-    pf.format.blueMax = ENDIAN16(vnc.server.bluemax);
-    pf.format.redShift = 0;
-    pf.format.greenShift = 8;
-    pf.format.blueShift = 16;
-
-    if( !rfb_write(&pf, sz_rfbSetPixelFormatMsg) )
-    {
-        return 0;
-    }
-#endif
-
     em.msg.type = rfbSetEncodings;
 
     em.enc[0] = ENDIAN32(rfbEncodingRaw);
@@ -348,11 +327,53 @@ int rfb_negotiate_frame_format(void)
     return 1;
 }
 
+void vnc_vm_off(void)
+{
+    unsigned int stride;
+    unsigned int height;
+    uint8_t *dst;
+    uint8_t *src;
+
+    // update the screen status anyway
+    memset(vnc.buf, 0, sizeof vnc.buf);
+
+    // draw the 'off' image
+    vnc.server.stride = VNC_DEACTIVE_HRES * VNC_DEACTIVE_PIXEL_SIZE;
+    vnc.server.width = VNC_DEACTIVE_HRES;
+    vnc.server.height = VNC_DEACTIVE_VRES;
+    vnc.server.pixelsize = VNC_DEACTIVE_PIXEL_SIZE;
+
+    src = vm_off_bin;
+    dst = vnc.buf + (VNC_DEACTIVE_IMG_Y * vnc.server.stride) + (VNC_DEACTIVE_IMG_X * vnc.server.pixelsize);
+    height = VNC_DEACTIVE_IMG_VRES;
+    stride = VNC_DEACTIVE_IMG_HRES * vnc.server.pixelsize;
+
+    while( height-- )
+    {
+        memcpy(dst, src, stride);
+        dst += vnc.server.stride;
+        src += stride;
+    }
+
+    vnc.status.fbsize_updated = 1;
+    vnc.status.updated = 1;
+    vnc.status.update_size = VNC_DEACTIVE_HRES * VNC_DEACTIVE_VRES * VNC_DEACTIVE_PIXEL_SIZE;
+    vnc.status.update_offset = 0;
+}
+
 int rfb_disconnect(void)
 {
-    fprintf(stdout, "shutting down socket.\n");
+    int status = close(vnc.sock);
+    fprintf(stdout, "disconnected.\n");
     fflush(stdout);
-    return close(vnc.sock);
+
+    // update the screen status anyway
+    memset(vnc.buf, 0, sizeof vnc.buf);
+
+    // show the off state
+    vnc_vm_off();
+
+    return status;
 }
 
 int rfb_cut_text_message(rfbServerToClientMsg *msg) {
@@ -387,15 +408,11 @@ int rfb_cut_text_message(rfbServerToClientMsg *msg) {
 
 static int rfb_enc_raw(rfbFramebufferUpdateRectHeader rectheader)
 {
-    //struct timespec time1, time2;
     unsigned int height = rectheader.r.h;
     unsigned int stride = rectheader.r.w * vnc.server.pixelsize;
-    unsigned int buf_stride = vnc.server.width * vnc.server.pixelsize;
     uint8_t *buf;
 
-    buf = vnc.buf + (buf_stride * rectheader.r.y) + (rectheader.r.x * vnc.server.pixelsize);
-
-    //clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &time1);
+    buf = vnc.buf + (rectheader.r.y * vnc.server.stride) + (rectheader.r.x * vnc.server.pixelsize);
 
     // optimize the case where data spans the whole screen
     // this doesn't actually help; because packets are huge
@@ -413,13 +430,8 @@ static int rfb_enc_raw(rfbFramebufferUpdateRectHeader rectheader)
             return 0;
         }
 
-        buf += buf_stride;
+        buf += vnc.server.stride;
     }
-
-    //clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &time2);
-
-    //fprintf(stdout, "%ld ns\n", time_diff(time1, time2));
-    //fflush(stdout);
 
     return 1;
 }
@@ -444,142 +456,148 @@ static int rfb_request_frame(uint8_t incr)
     return 1;
 }
 
-
 // handles incomming messages from the vnc server
 // this is where the dma operations should take place
 // pass it a pointer and it will tell you if you need to
 // refresh the screen that is in the buffer
-static int rfb_handle_message(scrn_status_t *status)
+static int rfb_handle_message(void)
 {
-    int count;
+    rfbFramebufferUpdateRectHeader rectheader;
+    rfbServerToClientMsg msg;
+    uint16_t i;
+    int miny = INT_MAX;
+    int maxy = INT_MIN;
 
-    ioctl(vnc.sock, FIONREAD, &count);
-    if( count > 1 )
+    if( !rfb_read(&msg, 1) )
     {
-        rfbFramebufferUpdateRectHeader rectheader;
-        rfbServerToClientMsg msg;
-        uint16_t i;
-        int miny = INT_MAX;
-        int maxy = INT_MIN;
-
-        if( !rfb_read(&msg, 1) )
-        {
-            return 0;
-        }
-
-        switch( msg.type )
-        {
-            case rfbFramebufferUpdate:
-                if( !rfb_read(((char*)&msg.fu) + 1, sz_rfbFramebufferUpdateMsg - 1) )
-                {
-                    return 0;
-                }
-                msg.fu.nRects = ENDIAN16(msg.fu.nRects);
-                for( i = 0; i < msg.fu.nRects; i++ )
-                {
-                    int result = 0;
-                    if( !rfb_read(&rectheader, sz_rfbFramebufferUpdateRectHeader) )
-                    {
-                            return 0;
-                    }
-
-                    rectheader.r.x = ENDIAN16(rectheader.r.x);
-                    rectheader.r.y = ENDIAN16(rectheader.r.y);
-                    rectheader.r.w = ENDIAN16(rectheader.r.w);
-                    rectheader.r.h = ENDIAN16(rectheader.r.h);
-
-                    // used for determining what region of the screen to update
-                    if( rectheader.r.y < miny )
-                    {
-                        miny = rectheader.r.y;
-                    }
-                    if( (rectheader.r.y + rectheader.r.h) > maxy )
-                    {
-                        maxy = rectheader.r.y + rectheader.r.h;
-                    }
-
-                    switch( ENDIAN32(rectheader.encoding) )
-                    {
-                        case rfbEncodingRaw:
-                            result = rfb_enc_raw(rectheader);
-                            break;
-                        case rfbEncodingNewFBSize:
-                            vnc.server.width = rectheader.r.w;
-                            vnc.server.height = rectheader.r.h;
-                            vnc.urq.w = ENDIAN16(vnc.server.width);
-                            vnc.urq.h = ENDIAN16(vnc.server.height);
-                            status->fbsize_updated = 1;
-                            fprintf(stdout, "resize requested: %dx%d\n", rectheader.r.w, rectheader.r.h);
-                            fflush(stdout);
-                            result = 1;
-                            break;
-                        case rfbEncodingLastRect:
-                            result = 1;
-                            break;
-                        default:
-                            fprintf(stdout, "unknwon request: %d", ENDIAN32(rectheader.encoding));
-                            break;
-                    }
-
-                    if( !result )
-                    {
-                        fprintf(stdout, "encoding failed.\n");
-                        return 0;
-                    }
-                }
-                rfb_request_frame(1);
-
-                // inform the user of the updated range
-                // this prevents copying of the entire buffer, and instead just the updated rectangle
-                if (status)
-                {
-                    status->updated = 1;
-                    status->update_offset = miny * vnc.server.width * vnc.server.pixelsize;
-                    status->update_size = (maxy - miny) * vnc.server.width * vnc.server.pixelsize;
-                }
-                break;
-            case rfbSetColourMapEntries:
-                rfb_read(((char*)&msg.scme) + 1, sz_rfbSetColourMapEntriesMsg - 1);
-                break;
-            case rfbBell:
-                break;
-            case rfbServerCutText:
-                if( !rfb_cut_text_message(&msg) )
-                {
-                    return 0;
-                }
-                break;
-            default:
-                fprintf(stdout, "encoding failed.\n");
-                return 0;
-        }
-    }
-    return count == -1 ? 0 : 1;
-}
-
-int rfb_grab(int update, scrn_status_t *status)
-{
-    int val;
-    socklen_t len = sizeof(val);
-
-    // check for frames
-    if( !rfb_handle_message(status) )
-    {
-        fprintf(stdout, "update error.\n");
-        fflush(stdout);
-        rfb_disconnect();
         return 0;
     }
-    if (update) {
-        rfb_request_frame(0);
+
+    switch( msg.type )
+    {
+        case rfbFramebufferUpdate:
+            if( !rfb_read(((char*)&msg.fu) + 1, sz_rfbFramebufferUpdateMsg - 1) )
+            {
+                return 0;
+            }
+            msg.fu.nRects = ENDIAN16(msg.fu.nRects);
+            for( i = 0; i < msg.fu.nRects; i++ )
+            {
+                int result = 0;
+                if( !rfb_read(&rectheader, sz_rfbFramebufferUpdateRectHeader) )
+                {
+                        return 0;
+                }
+
+                rectheader.r.x = ENDIAN16(rectheader.r.x);
+                rectheader.r.y = ENDIAN16(rectheader.r.y);
+                rectheader.r.w = ENDIAN16(rectheader.r.w);
+                rectheader.r.h = ENDIAN16(rectheader.r.h);
+
+                // used for determining what region of the screen to update
+                if( rectheader.r.y < miny )
+                {
+                    miny = rectheader.r.y;
+                }
+                if( (rectheader.r.y + rectheader.r.h) > maxy )
+                {
+                    maxy = rectheader.r.y + rectheader.r.h;
+                }
+
+                switch( ENDIAN32(rectheader.encoding) )
+                {
+                    case rfbEncodingRaw:
+                        result = rfb_enc_raw(rectheader);
+                        break;
+                    case rfbEncodingNewFBSize:
+                        vnc.server.width = rectheader.r.w;
+                        vnc.server.height = rectheader.r.h;
+                        vnc.server.stride = vnc.server.width * vnc.server.pixelsize;
+                        vnc.urq.w = ENDIAN16(vnc.server.width);
+                        vnc.urq.h = ENDIAN16(vnc.server.height);
+                        vnc.status.fbsize_updated = 1;
+                        vnc.status.updated = 1;
+
+                        // update the screen on resize
+                        memset(vnc.buf, 0, sizeof vnc.buf);
+                        miny = 0;
+                        maxy = vnc.server.height;
+                        fprintf(stdout, "resize requested: %dx%d\n", rectheader.r.w, rectheader.r.h);
+                        fflush(stdout);
+                        result = 1;
+                        break;
+                    case rfbEncodingLastRect:
+                        result = 1;
+                        break;
+                    default:
+                        fprintf(stdout, "unknwon request: %d", ENDIAN32(rectheader.encoding));
+                        break;
+                }
+
+                if( !result )
+                {
+                    fprintf(stdout, "encoding failed.\n");
+                    return 0;
+                }
+            }
+            rfb_request_frame(1);
+
+            // inform the user of the updated range
+            // this prevents copying of the entire buffer, and instead just the updated rectangle
+            vnc.status.updated = 1;
+            vnc.status.update_offset = miny * vnc.server.stride;
+            vnc.status.update_size = (maxy - miny) * vnc.server.stride;
+            break;
+        case rfbSetColourMapEntries:
+            rfb_read(((char*)&msg.scme) + 1, sz_rfbSetColourMapEntriesMsg - 1);
+            break;
+        case rfbBell:
+            break;
+        case rfbServerCutText:
+            if( !rfb_cut_text_message(&msg) )
+            {
+                return 0;
+            }
+            break;
+        default:
+            fprintf(stdout, "encoding failed.\n");
+            return 0;
     }
     return 1;
 }
 
+int rfb_grab(int update)
+{
+    uint32_t buf;
+
+    // check if the server disconnected
+    ssize_t connected = recv(vnc.sock, &buf, sizeof buf, MSG_PEEK | MSG_DONTWAIT);
+    if( connected == 0 )
+    {
+        rfb_disconnect();
+        return 0;
+    }
+    else
+    {
+        // check for frames
+        if( !rfb_handle_message() )
+        {
+            rfb_disconnect();
+            return 0;
+        }
+
+        // this is only for requesting a full frame update
+        if (update) {
+            rfb_request_frame(0);
+        }
+    }
+
+    return 1;
+}
 
 // connects to the hosted socket addresses
 // returns the socket file descriptor
-int rfb_connect(const char *path, uint16_t port, scrn_status_t *status)
+int rfb_connect(const char *path, uint16_t port)
 {
     // if port is used, assume tcp
     if (port) {
@@ -619,38 +637,22 @@ int rfb_connect(const char *path, uint16_t port, scrn_status_t *status)
     }
     else
     {
-        int val = 0;
-        socklen_t len = sizeof(val);
         struct sockaddr_un serv_addr;
         struct stat sb;
 
-        fprintf(stdout, "waiting for socket to appear... ");
+        fprintf(stdout, "attempting to connect to \'%s\'\n", path);
 
         while( stat(path, &sb) == -1 || (sb.st_mode & S_IFMT) != S_IFSOCK )
         {
-            sleep(1);
+            return 2;
         }
-        fprintf(stdout, "complete.\n");
 
-        fprintf(stdout, "attempting to start unix socket... ");
         if( (vnc.sock = socket(AF_UNIX, SOCK_STREAM, 0)) < 0 )
         {
             printf("error.\n");
             return 0;
         }
-        fprintf(stdout, "complete.\n");
-        fprintf(stdout, "attempting to connect to \'%s\'... ", path);
-/*
-        while( val == 0 )
-        {
-            if( getsockopt(vnc.sock, SOL_SOCKET, SO_ACCEPTCONN, &val, &len) < 0 )
-            {
-                rfb_disconnect();
-                return 0;
-            }
-            sleep(1);
-        }
-*/
+
         memset(&serv_addr, '0', sizeof(serv_addr));
 
         serv_addr.sun_family = AF_UNIX;
@@ -659,13 +661,11 @@ int rfb_connect(const char *path, uint16_t port, scrn_status_t *status)
              strncpy(serv_addr.sun_path, path, sizeof(serv_addr.sun_path) - 1);
         }
 
-        // actually try to connect
-        if( connect(vnc.sock, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0 )
+        if( (connect(vnc.sock, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0) )
         {
-            fprintf(stdout, "could not open.\n");
-            return 0;
+            return 2;
         }
-        fprintf(stdout, "complete.\n");
+        fprintf(stdout, "connected.\n");
     }
 
     // next, attempt to link to rfb
@@ -697,18 +697,15 @@ int rfb_connect(const char *path, uint16_t port, scrn_status_t *status)
 
     fprintf(stdout, "successfully connected to vnc server.\n");
 
-    // who knows... but it doesn't like it when I try to request before ready
+    // just wait for data, not needed but it makes me feel better
     sleep(1);
 
     // request the first frame
     rfb_request_frame(0);
 
     // inform the drawer to set the new size
-    if( status )
-    {
-        status->fbsize_updated = 1;
-        status->updated = 0;
-    }
+    vnc.status.fbsize_updated = 1;
+    vnc.status.updated = 0;
 
     fflush(stdout);
     fflush(stderr);

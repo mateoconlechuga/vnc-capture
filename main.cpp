@@ -1,7 +1,7 @@
 #include <QApplication>
 #include <QMainWindow>
 #include <QPainter>
-#include <QTimer>
+#include <QTime>
 #include <QShortcut>
 #include "vnc.h"
 
@@ -29,16 +29,16 @@ protected:
         c.drawImage(cw, m_image);
     }
 public:
-    void refresh(scrn_status_t *status)
+    void refresh(void)
     {
-        memcpy(m_image.bits() + status->update_offset, vnc.buf + status->update_offset, static_cast<size_t>(status->update_size));
+        memcpy(m_image.bits() + vnc.status.update_offset, vnc.buf + vnc.status.update_offset, static_cast<size_t>(vnc.status.update_size));
         update();
     }
     void setsize(int w, int h)
     {
         m_w = w;
         m_h = h;
-        m_image = QImage(m_w, m_h, QImage::Format_RGBA8888);
+        m_image = QImage(m_w, m_h, QImage::Format_RGBX8888);
     }
     Screen(QWidget *parent = Q_NULLPTR) : QWidget(parent)
     {
@@ -50,44 +50,70 @@ private:
     int m_w, m_h;
 };
 
+void update(QMainWindow &w, Screen &scrn)
+{
+    if( vnc.status.fbsize_updated )
+    {
+        vnc.status.fbsize_updated = 0;
+        w.setFixedSize(vnc.server.width, vnc.server.height);
+        scrn.setsize(vnc.server.width, vnc.server.height);
+    }
+    if( vnc.status.updated )
+    {
+        vnc.status.updated = 0;
+        scrn.refresh();
+    }
+    qApp->processEvents();
+}
+
 int main(int argc, char *argv[])
 {
     QApplication a(argc, argv);
     QMainWindow w;
     Screen scrn;
-    scrn_status_t status;
     int value;
 
     w.setCentralWidget(&scrn);
     w.setFixedSize(0, 0);
     w.show();
 
-    value = rfb_connect(static_cast<const char*>(VNC_PATH), VNC_PORT, &status);
-    if( value == 0 )
+    while( 1 )
     {
-        return a.exec();
-    }
+        while( 1 )
+        {
+            value = rfb_connect(static_cast<const char*>(VNC_PATH), VNC_PORT);
+            if( value == 0 )
+            {
+                return a.exec();
+            }
+            if( value == 1 )
+            {
+                break;
+            }
+            if( value == 2 )
+            {
+                vnc_vm_off();
+                update(w, scrn);
+                QTime dt = QTime::currentTime().addMSecs(2000);
+                while (QTime::currentTime() < dt) {
+                    qApp->processEvents();
+                }
+                continue;
+            }
+        }
 
-    while( 1 ) {
-        if( !rfb_grab(0, &status) )
+        while( 1 )
         {
-            break;
+            if( !rfb_grab(0) )
+            {
+                break;
+            }
+            update(w, scrn);
         }
-        if( status.fbsize_updated )
-        {
-            status.fbsize_updated = 0;
-            w.setFixedSize(vnc.server.width, vnc.server.height);
-            scrn.setsize(vnc.server.width, vnc.server.height);
-        }
-        if( status.updated )
-        {
-            status.updated = 0;
-            scrn.refresh(&status);
-        }
-        qApp->processEvents();
-    }
 
-    rfb_disconnect();
+        fprintf(stdout, "vnc connection lost.\n");
+        fflush(stdout);
+    }
 
     return a.exec();
 }

@@ -46,7 +46,8 @@ QMAKE_LFLAGS    += $$GLOBAL_FLAGS
 
 SOURCES += \
     main.cpp \
-    vnc.c
+    vnc.c \
+    vm-off.c
 
 HEADERS  += \
     rfbproto.h \

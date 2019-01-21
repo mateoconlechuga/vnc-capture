@@ -6,7 +6,16 @@ extern "C" {
 #endif
 
 // don't try to tell the server what to do
-#define USE_SERVER_FORMAT
+#define VNC_DEACTIVE_HRES 800
+#define VNC_DEACTIVE_VRES 600
+#define VNC_DEACTIVE_PIXEL_SIZE 4
+
+#define VNC_DEACTIVE_IMG_HRES 400
+#define VNC_DEACTIVE_IMG_VRES 200
+#define VNC_DEACTIVE_IMG_X (((VNC_DEACTIVE_HRES) / 2) - ((VNC_DEACTIVE_IMG_HRES) / 2))
+#define VNC_DEACTIVE_IMG_Y (((VNC_DEACTIVE_VRES) / 2) - ((VNC_DEACTIVE_IMG_VRES) / 2))
+
+extern unsigned char vm_off_bin[];
 
 #include <stdint.h>
 
@@ -43,19 +52,9 @@ typedef struct
    unsigned int greenshift;
    unsigned int blueshift;
    unsigned int pixelsize;
+   unsigned int stride;
 }
 server_t;
-
-typedef struct
-{
-    int sock;                         // connected socket for xfer
-    int version;                      // version of protocol between client / server
-    server_t server;
-    uint8_t buf[4610 * 2160 * 4 * 2]; // buffer for storing pixel data
-    rfbFramebufferUpdateRequestMsg urq;
-}
-vnc_t;
-extern vnc_t vnc;
 
 typedef struct
 {
@@ -66,8 +65,22 @@ typedef struct
 }
 scrn_status_t;
 
-int rfb_connect(const char *ip, uint16_t port, scrn_status_t *status);
-int rfb_grab(int update, scrn_status_t *status);
+typedef struct
+{
+    char *path;
+    int sock;                         // connected socket for xfer
+    int version;                      // version of protocol between client / server
+    server_t server;
+    uint8_t buf[4610 * 2160 * 4 * 2]; // buffer for storing pixel data
+    rfbFramebufferUpdateRequestMsg urq;
+    scrn_status_t status;
+}
+vnc_t;
+extern vnc_t vnc;
+
+void vnc_vm_off(void);
+int rfb_connect(const char *ip, uint16_t port);
+int rfb_grab(int update);
 int rfb_disconnect(void);
 
 #ifdef __cplusplus
