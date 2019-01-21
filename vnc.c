@@ -601,19 +601,13 @@ int rfb_connect(const char *path, uint16_t port)
 {
     // if port is used, assume tcp
     if (port) {
-
         struct sockaddr_in serv_addr;
-        int one = 1;
 
-        fprintf(stdout, "attempting to start tcp socket... ");
         if( (vnc.sock = socket(AF_INET, SOCK_STREAM, 0)) < 0 )
         {
-            printf("error.\n");
+            fprintf(stdout, "socket error.\n");
             return 0;
         }
-        fprintf(stdout, "complete.\n");
-        fprintf(stdout, "attempting to connect to \'%s:%d\'... ", path, port);
-
         memset(&serv_addr, '0', sizeof(serv_addr));
 
         serv_addr.sin_family = AF_INET;
@@ -628,19 +622,15 @@ int rfb_connect(const char *path, uint16_t port)
         // actually try to connect
         if( connect(vnc.sock, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0 )
         {
-            fprintf(stdout, "could not open.\n");
-            return 0;
+            return 2;
         }
-        fprintf(stdout, "complete.\n");
-        fprintf(stdout, "attempting to set socket options... ");
-
     }
     else
     {
         struct sockaddr_un serv_addr;
         struct stat sb;
 
-        fprintf(stdout, "attempting to connect to \'%s\'\n", path);
+        //fprintf(stdout, "attempting to connect to \'%s\'\n", path);
 
         while( stat(path, &sb) == -1 || (sb.st_mode & S_IFMT) != S_IFSOCK )
         {
@@ -649,7 +639,7 @@ int rfb_connect(const char *path, uint16_t port)
 
         if( (vnc.sock = socket(AF_UNIX, SOCK_STREAM, 0)) < 0 )
         {
-            printf("error.\n");
+            fprintf(stdout, "socket error.\n");
             return 0;
         }
 
@@ -665,7 +655,7 @@ int rfb_connect(const char *path, uint16_t port)
         {
             return 2;
         }
-        fprintf(stdout, "connected.\n");
+        //fprintf(stdout, "connected.\n");
     }
 
     // next, attempt to link to rfb
